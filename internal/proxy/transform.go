@@ -1,4 +1,4 @@
-package proxy
+﻿package proxy
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 
 // transformRequestPayload 将 Codex /v1/responses 格式的请求体转换为 OpenAI /chat/completions 格式。
 func transformRequestPayload(body []byte, fallback string, forceModelOverride bool) ([]byte, error) {
+	// 空请求体：仅注入 model 字段
 	if len(body) == 0 {
 		if fallback == "" {
 			return body, nil
@@ -17,10 +18,14 @@ func transformRequestPayload(body []byte, fallback string, forceModelOverride bo
 		return json.Marshal(map[string]any{"model": fallback})
 	}
 
+	// 解析 JSON
+
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal body: %w", err)
 	}
+
+	// 模型字段处理：FORCE_MODEL_OVERRIDE=1 时强制覆盖；空模型时回退到 fallback
 
 	model, ok := payload["model"].(string)
 	if forceModelOverride && strings.TrimSpace(fallback) != "" {
@@ -31,8 +36,12 @@ func transformRequestPayload(body []byte, fallback string, forceModelOverride bo
 		}
 	}
 
+	// ★ 关键转换 1：将 instructions + input 字段翻译为 OpenAI messages 数组
+
 	if _, exists := payload["messages"]; !exists {
 		messages := make([]map[string]any, 0, 2)
+
+		// instructions → system role 消息
 
 		if instructions := util.TrimStringValue(payload["instructions"]); instructions != "" {
 			messages = append(messages, map[string]any{
@@ -41,15 +50,21 @@ func transformRequestPayload(body []byte, fallback string, forceModelOverride bo
 			})
 		}
 
+		// input 字段 → user / assistant / tool 消息
+
 		messages = append(messages, buildMessagesFromInput(payload["input"])...)
 		if len(messages) > 0 {
 			payload["messages"] = messages
 		}
 	}
 
+	// ★ 关键转换 2：规范化已有 messages 数组（role 映射 + 字段清理）
+
 	if messages, ok := payload["messages"].([]any); ok {
 		payload["messages"] = normalizeMessages(messages)
 	}
+
+	// ★ 关键转换 3：max_output_tokens → max_tokens
 
 	if _, exists := payload["max_output_tokens"]; exists {
 		if _, hasMaxTokens := payload["max_tokens"]; !hasMaxTokens {
@@ -57,6 +72,8 @@ func transformRequestPayload(body []byte, fallback string, forceModelOverride bo
 		}
 		delete(payload, "max_output_tokens")
 	}
+
+	// ★ 关键转换 4：规范化 tools（name → function.name；丢弃非 function 类型）
 
 	if tools, ok := payload["tools"].([]any); ok {
 		normalizedTools := normalizeTools(tools)
@@ -68,13 +85,16 @@ func transformRequestPayload(body []byte, fallback string, forceModelOverride bo
 		}
 	}
 
+	// 清理 Codex 独有字段，避免传入上游
+
 	delete(payload, "input")
 	delete(payload, "instructions")
 
 	return json.Marshal(payload)
 }
 
-// buildMessagesFromInput 将 Codex 的 input 字段转换为 OpenAI 标准 messages 数组。
+// buildMessagesFromInput 将 Codex 的 input 字段转换为 messages 数组。
+// 支持三种格式：纯文本字符串（→ user）、条目数组（→ 逐条转换）、单个对象。
 func buildMessagesFromInput(input any) []map[string]any {
 	switch value := input.(type) {
 	case string:
@@ -89,6 +109,7 @@ func buildMessagesFromInput(input any) []map[string]any {
 	case []any:
 		messages := make([]map[string]any, 0, len(value))
 		for _, item := range value {
+			// input 字段 → user / assistant / tool 消息
 			messages = append(messages, buildMessagesFromInputItem(item)...)
 		}
 		return messages
@@ -99,7 +120,10 @@ func buildMessagesFromInput(input any) []map[string]any {
 	}
 }
 
-// buildMessagesFromInputItem 根据 Codex input 条目的 type 字段进行分派转换。
+// buildMessagesFromInputItem 按 Codex input 条目的 type 分派转换：
+//   - "function_call"          → assistant 消息（含 tool_calls）
+//   - "function_call_output"   → tool 消息（含 tool_call_id + output）
+//   - "" / "message" / 其他    → 标准 role + content 消息
 func buildMessagesFromInputItem(value any) []map[string]any {
 	item, ok := value.(map[string]any)
 	if !ok {
@@ -130,6 +154,7 @@ func buildMessagesFromInputItem(value any) []map[string]any {
 	}
 }
 
+// buildFunctionCallMessage 将 function_call 条目转为 assistant + tool_calls 消息。
 func buildFunctionCallMessage(item map[string]any) []map[string]any {
 	callID := util.FirstNonEmpty(util.TrimStringValue(item["call_id"]), util.TrimStringValue(item["tool_call_id"]))
 	name := util.TrimStringValue(item["name"])
@@ -152,6 +177,7 @@ func buildFunctionCallMessage(item map[string]any) []map[string]any {
 	}}
 }
 
+// buildFunctionCallOutputMessage 将 function_call_output 条目转为 tool role 消息。
 func buildFunctionCallOutputMessage(item map[string]any) []map[string]any {
 	callID := util.FirstNonEmpty(util.TrimStringValue(item["call_id"]), util.TrimStringValue(item["tool_call_id"]))
 	output := util.StringifyValue(item["output"])
@@ -165,7 +191,8 @@ func buildFunctionCallOutputMessage(item map[string]any) []map[string]any {
 	}}
 }
 
-// buildSingleMessage 从 Codex input 条目中提取 role 和 content，构建单条标准消息。
+// buildSingleMessage 从输入条目提取 role + content，构建一条标准消息。
+// role 会经过 normalizeRole 映射（developer → system）。
 func buildSingleMessage(value any) map[string]any {
 	item, ok := value.(map[string]any)
 	if !ok {
@@ -193,7 +220,7 @@ func buildSingleMessage(value any) map[string]any {
 	}
 }
 
-// normalizeMessages 规范化 messages 数组中的每条消息。
+// normalizeMessages 批量规范化已有 messages 数组中的每条消息。
 func normalizeMessages(messages []any) []map[string]any {
 	normalized := make([]map[string]any, 0, len(messages))
 	for _, item := range messages {
@@ -228,7 +255,7 @@ func normalizeMessages(messages []any) []map[string]any {
 	return normalized
 }
 
-// normalizeRole 将角色名映射到上游支持的四种标准角色。developer → system
+// normalizeRole 将角色映射到上游支持的四种标准角色（developer → system）。
 func normalizeRole(role string) string {
 	switch strings.TrimSpace(strings.ToLower(role)) {
 	case "", "user":
@@ -244,7 +271,8 @@ func normalizeRole(role string) string {
 	}
 }
 
-// normalizeTools 规范化 tools 数组，只保留 type="function" 的工具。
+// normalizeTools 规范化 tools 数组，只保留 type="function" 的工具定义。
+// 若 name 等字段在顶层（非 function 子对象中），自动移入 function.name。
 func normalizeTools(tools []any) []map[string]any {
 	normalized := make([]map[string]any, 0, len(tools))
 	for _, item := range tools {

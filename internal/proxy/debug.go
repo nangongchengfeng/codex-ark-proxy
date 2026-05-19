@@ -1,4 +1,4 @@
-package proxy
+﻿package proxy
 
 import (
 	"encoding/json"
@@ -9,7 +9,8 @@ import (
 	"proxy_doubao/internal/util"
 )
 
-// summarizePayload 将请求/响应 JSON 载荷压缩为一行摘要，方便调试日志。
+// summarizePayload 将请求/响应 JSON 载荷压缩为一行可读摘要，用于调试日志。
+// 摘要包含：顶层 key 列表、model、messages/input/tools 是否存在、消息角色序列、工具名称等。
 func summarizePayload(body []byte) string {
 	if len(body) == 0 {
 		return "empty-body"
@@ -20,6 +21,8 @@ func summarizePayload(body []byte) string {
 		return fmt.Sprintf("invalid-json len=%d", len(body))
 	}
 
+	// 始终包含：keys、model、关键字段是否存在
+
 	parts := []string{
 		fmt.Sprintf("keys=%v", sortedKeys(payload)),
 		fmt.Sprintf("model=%q", util.TrimStringValue(payload["model"])),
@@ -29,14 +32,20 @@ func summarizePayload(body []byte) string {
 		fmt.Sprintf("tool_choice=%q", util.TrimStringValue(payload["tool_choice"])),
 	}
 
+	// 展开 messages 数组的角色序列和详细信息
+
 	if messages, ok := payload["messages"].([]any); ok {
 		parts = append(parts, "message_roles="+strings.Join(extractMessageRoles(messages), ","))
 		parts = append(parts, "message_details="+strings.Join(extractMessageDetails(messages), ";"))
 	}
 
+	// 展开 tools 数组的摘要信息
+
 	if tools, ok := payload["tools"].([]any); ok {
 		parts = append(parts, "tools="+strings.Join(extractToolSummaries(tools), ";"))
 	}
+
+	// 展开 input 字段的摘要信息
 
 	if input, exists := payload["input"]; exists {
 		parts = append(parts, "input_details="+strings.Join(extractInputSummaries(input), ";"))
@@ -45,6 +54,7 @@ func summarizePayload(body []byte) string {
 	return strings.Join(parts, " ")
 }
 
+// sortedKeys 返回 map 的 key 列表（按字母排序），确保日志可对比。
 func sortedKeys(payload map[string]any) []string {
 	keys := make([]string, 0, len(payload))
 	for key := range payload {
@@ -54,6 +64,7 @@ func sortedKeys(payload map[string]any) []string {
 	return keys
 }
 
+// extractMessageRoles 提取消息数组中的 role 序列，如 "system,user,assistant"。
 func extractMessageRoles(messages []any) []string {
 	roles := make([]string, 0, len(messages))
 	for _, item := range messages {
@@ -67,6 +78,7 @@ func extractMessageRoles(messages []any) []string {
 	return roles
 }
 
+// extractMessageDetails 提取每条消息的详细信息：role、keys、tool_call_id、是否有 tool_calls。
 func extractMessageDetails(messages []any) []string {
 	details := make([]string, 0, len(messages))
 	for idx, item := range messages {
@@ -87,6 +99,7 @@ func extractMessageDetails(messages []any) []string {
 	return details
 }
 
+// extractInputSummaries 根据 input 的类型（string/array/object）提取摘要信息。
 func extractInputSummaries(input any) []string {
 	switch value := input.(type) {
 	case []any:
@@ -128,6 +141,7 @@ func summarizeInputItem(idx int, item any) string {
 	)
 }
 
+// extractToolSummaries 提取 tools 数组中每个工具的类型、名称等信息。
 func extractToolSummaries(tools []any) []string {
 	summaries := make([]string, 0, len(tools))
 	for idx, item := range tools {

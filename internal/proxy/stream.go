@@ -67,21 +67,29 @@ type toolCallState struct {
 
 // streamResponse 将上游 SSE 流实时转换为 Codex /v1/responses 格式。
 func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug bool, verbose bool) error {
+	// 逐行扫描上游 SSE 事件流
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	// 初始化流状态机（跟踪 response 生命周期 + 文本/工具调用状态）
 
 	state := &responseStreamState{debugVerbose: verbose}
 	chunkCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
+		// 跳过非 SSE data 行
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 
+		// 提取 data: 后的 JSON payload
+
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		// 跳过空 data 行
 		if data == "" {
 			continue
 		}
+		// ★ 上游流结束标记，跳出扫描循环
 		if data == "[DONE]" {
 			if debug {
 				log.Printf("[proxy-debug] stream-done-marker chunks=%d", chunkCount)
@@ -95,6 +103,8 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug boo
 			log.Printf("[proxy-debug-sse-in] chunk=%d data=%s", chunkCount+1, data)
 		}
 
+		// 解析上游 chunk JSON
+
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			if debug {
@@ -103,6 +113,8 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug boo
 			continue
 		}
 		chunkCount++
+
+		// ★ 核心：将上游 chunk 转换为 Codex SSE 事件并写入客户端
 
 		if err := state.consumeChunk(chunk, w, flusher); err != nil {
 			if debug {
@@ -117,6 +129,8 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug boo
 		}
 		return err
 	}
+
+	// 发送流结束事件：content_part.done → output_text.done → output_item.done → response.completed
 
 	if err := state.finish(w, flusher); err != nil {
 		if debug {
@@ -138,6 +152,7 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug boo
 }
 
 func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Writer, flusher http.Flusher) error {
+	// ★ 延迟初始化：收到第一个有效 chunk 时才构建 response ID / model 等元信息
 	if s.responseID == "" {
 		s.responseID = util.FirstNonEmpty(strings.TrimSpace(chunk.ID), "resp-proxy")
 		s.textItemID = "msg-" + s.responseID
@@ -146,6 +161,10 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 		s.createdAt = chunk.Created
 		s.toolCalls = map[int]*toolCallState{}
 	}
+
+	// 发送 response.created 事件（整个流仅发送一次）
+
+	// 如果从未发送过 created 事件（无有效 chunk），直接返回
 
 	if !s.createdSent {
 		if err := writeSSEEvent(w, flusher, map[string]any{
@@ -164,12 +183,17 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 		s.createdSent = true
 	}
 
+	// 遍历 choices：处理工具调用增量和文本增量
+
 	for _, choice := range chunk.Choices {
+		// 处理 tool_calls 增量（function_call_arguments.delta 事件）
 		for _, toolCall := range choice.Delta.ToolCalls {
 			if err := s.consumeToolCall(toolCall, w, flusher); err != nil {
 				return err
 			}
 		}
+
+		// 处理文本增量（output_text.delta 事件）
 
 		if delta := choice.Delta.Content; delta != "" {
 			if err := s.ensureTextItem(w, flusher); err != nil {
@@ -191,6 +215,8 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 	return nil
 }
 
+// ensureTextItem 按需发送 response.output_item.added 和 response.content_part.added 事件。
+// 仅在首次收到文本内容时触发一次，建立 Codex 侧的消息条目和内容片段。
 func (s *responseStreamState) ensureTextItem(w io.Writer, flusher http.Flusher) error {
 	if s.textOutputIdx < 0 {
 		s.textOutputIdx = s.nextOutputIdx
@@ -238,6 +264,8 @@ func (s *responseStreamState) ensureTextItem(w io.Writer, flusher http.Flusher) 
 	return nil
 }
 
+// consumeToolCall 处理单个工具调用的流式增量。
+// 首次出现发送 response.output_item.added，后续 arguments 增量发送 response.function_call_arguments.delta。
 func (s *responseStreamState) consumeToolCall(toolCall struct {
 	Index    int    `json:"index"`
 	ID       string `json:"id"`
@@ -247,6 +275,7 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 		Arguments string `json:"arguments"`
 	} `json:"function"`
 }, w io.Writer, flusher http.Flusher) error {
+	// 查找或创建该 index 对应的工具调用状态
 	state, exists := s.toolCalls[toolCall.Index]
 	if !exists {
 		callID := util.FirstNonEmpty(strings.TrimSpace(toolCall.ID), fmt.Sprintf("call-%s-%d", s.responseID, toolCall.Index))
@@ -260,12 +289,17 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 		s.toolCalls[toolCall.Index] = state
 	}
 
+	// 累积 name 字段（可能在多个 chunk 中分段到达）
+
 	if name := strings.TrimSpace(toolCall.Function.Name); name != "" {
 		state.name = name
 	}
+	// 累积 arguments 字段（流式分段拼接）
 	if args := toolCall.Function.Arguments; args != "" {
 		state.args.WriteString(args)
 	}
+
+	// 首次到达时发送 output_item.added 事件
 
 	if !state.itemSent {
 		if err := writeSSEEvent(w, flusher, map[string]any{
@@ -285,6 +319,8 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 		state.itemSent = true
 	}
 
+	// 发送 function_call_arguments.delta 事件
+
 	if delta := toolCall.Function.Arguments; delta != "" {
 		if err := writeSSEEvent(w, flusher, map[string]any{
 			"type":         "response.function_call_arguments.delta",
@@ -300,12 +336,16 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 }
 
 func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
+	// 如果从未发送过 created 事件（无有效 chunk），则无需收尾
 	if !s.createdSent {
 		return nil
 	}
 
 	output := make([]map[string]any, 0, 1+len(s.toolCalls))
 	text := s.textBuilder.String()
+
+	// ★ 收尾文本输出：content_part.done → output_text.done → output_item.done
+	//   三个事件的 send 顺序对应 Codex 的生命周期：片段完成 → 文本完成 → 条目完成
 
 	if s.partSent {
 		if err := writeSSEEvent(w, flusher, map[string]any{
@@ -361,6 +401,8 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 		})
 	}
 
+	// ★ 收尾工具调用：按 index 排序后发送 function_call_arguments.done → output_item.done
+
 	toolIndexes := make([]int, 0, len(s.toolCalls))
 	for index := range s.toolCalls {
 		toolIndexes = append(toolIndexes, index)
@@ -397,6 +439,8 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 		output = append(output, item)
 	}
 
+	// ★ 最后发送 response.completed，汇总所有 output 条目
+
 	return writeSSEEvent(w, flusher, map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
@@ -410,6 +454,8 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 	}, s.debugVerbose)
 }
 
+// writeSSEEvent 将 Codex 事件序列化为 JSON 后以 SSE 格式写入。
+// 格式：data: {JSON}\n\n
 func writeSSEEvent(w io.Writer, flusher http.Flusher, payload any, verbose bool) error {
 	data, err := json.Marshal(payload)
 	if err != nil {

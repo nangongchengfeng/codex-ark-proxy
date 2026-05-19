@@ -1,4 +1,4 @@
-package util
+﻿package util
 
 import (
 	"encoding/json"
@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// FirstNonEmpty 返回第一个非空字符串值；若所有值均为空，则返回空字符串。
-// 常用于环境变量优先级查找：先检查新变量名，再回退到旧变量名，最后使用默认值。
+// FirstNonEmpty 返回第一个非空字符串值。
+// 用于环境变量优先级链：先检查新变量名 → 回退旧变量名 → 最后使用默认值。
 func FirstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -17,8 +17,7 @@ func FirstNonEmpty(values ...string) string {
 	return ""
 }
 
-// TrimStringValue 将 any 类型安全转换为 string 并去除首尾空白。
-// 若值不是 string 类型，返回空字符串。
+// TrimStringValue 将 any 安全转为 string 并去空白，非 string 类型返回空字符串。
 func TrimStringValue(value any) string {
 	text, ok := value.(string)
 	if !ok {
@@ -27,9 +26,8 @@ func TrimStringValue(value any) string {
 	return strings.TrimSpace(text)
 }
 
-// StringifyValue 将任意值转为 JSON 字符串表示。
-// 对于 nil 返回空字符串；对于 string 直接返回去空白后的值；
-// 对于其他类型通过 json.Marshal 序列化。
+// StringifyValue 将任意值转为 JSON 字符串。
+// nil → ""；string → 去空白后返回；其他 → json.Marshal 序列化。
 func StringifyValue(value any) string {
 	switch typed := value.(type) {
 	case nil:
@@ -45,11 +43,10 @@ func StringifyValue(value any) string {
 	}
 }
 
-// NormalizeContentValue 规范化消息内容字段，支持以下格式：
-//   - 纯文本字符串
-//   - OpenAI 风格的 content 数组（text / input_text / output_text）
-//
-// 返回规范化的文本内容，若内容为空则返回 nil。
+// NormalizeContentValue 规范化消息的 content 字段，统一处理以下格式：
+//   - 纯文本字符串 → 去空白直接返回
+//   - content 数组（OpenAI 风格） → 拼接 text/input_text/output_text
+//   - 空内容 → 返回 nil
 func NormalizeContentValue(value any) any {
 	switch content := value.(type) {
 	case string:
@@ -88,7 +85,7 @@ func NormalizeContentValue(value any) any {
 	}
 }
 
-// TruncateLogBody 截断日志内容到指定长度，超出部分用 "...(truncated)" 标记。
+// TruncateLogBody 截断日志字符串到指定长度，超出部分标记 "...(truncated)"。
 func TruncateLogBody(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= limit {

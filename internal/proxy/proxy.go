@@ -100,8 +100,11 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[proxy-debug] upstream-status=%d content-type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 
+	// ── 关键分支：检测上游是否为流式响应 ──
+	// 流水线：transformRequestPayload 已解析 stream 字段，此处通过响应头二次确认
 	streaming := isEventStream(resp.Header)
 	var flusher http.Flusher
+	// ── 流式分支：逐 chunk 读取上游 SSE 流，实时转换为 Codex 事件序列 ──
 	if streaming {
 		var ok bool
 		flusher, ok = w.(http.Flusher)
@@ -126,6 +129,7 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		} else if p.cfg.DebugProxy {
 			log.Printf("[proxy-debug] stream-end status=ok")
 		}
+		// ── 非流式分支：一次性读取上游完整响应体，原样回写客户端 ──
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
