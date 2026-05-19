@@ -448,6 +448,31 @@ func TestProxyTransformsFunctionCallOutputIntoToolMessage(t *testing.T) {
 	}
 }
 
+func TestTransformRequestPayloadForceModelOverride(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4-mini","input":"hi"}`)
+
+	payload, err := transformRequestPayload(body, "doubao-seed-2-0-code-preview-260215", true)
+	if err != nil {
+		t.Fatalf("transformRequestPayload returned error: %v", err)
+	}
+
+	var transformed map[string]any
+	if err := json.Unmarshal(payload, &transformed); err != nil {
+		t.Fatalf("unexpected transformed payload: %v", err)
+	}
+
+	if transformed["model"] != "doubao-seed-2-0-code-preview-260215" {
+		t.Fatalf("expected model override, got %v", transformed["model"])
+	}
+}
+
+func TestSummarizePayloadIncludesModel(t *testing.T) {
+	summary := summarizePayload([]byte(`{"model":"doubao-seed-2-0-code-preview-260215","input":"hi"}`))
+	if !strings.Contains(summary, `model="doubao-seed-2-0-code-preview-260215"`) {
+		t.Fatalf("expected summary to include model, got %s", summary)
+	}
+}
+
 func TestProxyPassesThroughUpstreamError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

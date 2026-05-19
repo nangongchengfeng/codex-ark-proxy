@@ -59,3 +59,17 @@ func TestLoadConfigSupportsLegacyArkEnv(t *testing.T) {
 		t.Fatalf("unexpected model: %s", cfg.Model)
 	}
 }
+
+func TestLoadConfigForceModelOverride(t *testing.T) {
+	t.Setenv("VOLCANO_API_KEY", "test-key")
+	t.Setenv("FORCE_MODEL_OVERRIDE", "1")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if !cfg.ForceModelOverride {
+		t.Fatalf("expected ForceModelOverride to be true")
+	}
+}

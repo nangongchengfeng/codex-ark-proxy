@@ -25,6 +25,7 @@ type Config struct {
 	Model           string
 	UpstreamTimeout time.Duration
 	DebugProxy      bool
+	ForceModelOverride bool
 }
 
 func LoadConfig() (Config, error) {
@@ -37,6 +38,7 @@ func LoadConfig() (Config, error) {
 		Model:           firstNonEmpty(os.Getenv("VOLCANO_MODEL"), os.Getenv("ARK_MODEL"), defaultModel),
 		UpstreamTimeout: defaultTimeout,
 		DebugProxy:      parseBoolEnv(os.Getenv("DEBUG_PROXY")),
+		ForceModelOverride: parseBoolEnv(firstNonEmpty(os.Getenv("FORCE_MODEL_OVERRIDE"), os.Getenv("VOLCANO_FORCE_MODEL_OVERRIDE"), os.Getenv("ARK_FORCE_MODEL_OVERRIDE"))),
 	}
 
 	if cfg.APIKey == "" {

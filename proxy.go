@@ -48,7 +48,7 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	p.debugLogRequest("incoming", body)
 
-	payload, err := transformRequestPayload(body, p.cfg.Model)
+	payload, err := transformRequestPayload(body, p.cfg.Model, p.cfg.ForceModelOverride)
 	if err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
@@ -130,7 +130,7 @@ func (p *Proxy) debugLogResponse(status int, body []byte) {
 	log.Printf("[proxy-debug] upstream-response status=%d body=%s", status, truncateLogBody(string(body), 1200))
 }
 
-func transformRequestPayload(body []byte, fallback string) ([]byte, error) {
+func transformRequestPayload(body []byte, fallback string, forceModelOverride bool) ([]byte, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		if fallback == "" {
 			return body, nil
@@ -144,7 +144,9 @@ func transformRequestPayload(body []byte, fallback string) ([]byte, error) {
 	}
 
 	model, ok := payload["model"].(string)
-	if !ok || strings.TrimSpace(model) == "" {
+	if forceModelOverride && strings.TrimSpace(fallback) != "" {
+		payload["model"] = fallback
+	} else if !ok || strings.TrimSpace(model) == "" {
 		if fallback != "" {
 			payload["model"] = fallback
 		}
@@ -412,6 +414,7 @@ func summarizePayload(body []byte) string {
 
 	parts := []string{
 		fmt.Sprintf("keys=%v", sortedKeys(payload)),
+		fmt.Sprintf("model=%q", trimStringValue(payload["model"])),
 		fmt.Sprintf("has_messages=%t", payload["messages"] != nil),
 		fmt.Sprintf("has_input=%t", payload["input"] != nil),
 		fmt.Sprintf("has_tools=%t", payload["tools"] != nil),
