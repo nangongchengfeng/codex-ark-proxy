@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +21,7 @@ type Proxy struct {
 
 func NewProxy(cfg Config, client *http.Client) *Proxy {
 	if client == nil {
-		client = &http.Client{Timeout: cfg.UpstreamTimeout}
+		client = &http.Client{}
 	}
 
 	return &Proxy{
@@ -47,6 +48,7 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.debugLogRequest("incoming", body)
+	p.debugLogBody("incoming", body)
 
 	payload, err := transformRequestPayload(body, p.cfg.Model, p.cfg.ForceModelOverride)
 	if err != nil {
@@ -54,9 +56,18 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.debugLogRequest("transformed", payload)
+	p.debugLogBody("transformed", payload)
+	requestStreaming := payloadRequestsStreaming(payload)
 
 	targetURL := p.cfg.BaseURL + "/chat/completions"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(payload))
+	reqContext := r.Context()
+	var cancel context.CancelFunc
+	if !requestStreaming && p.cfg.UpstreamTimeout > 0 {
+		reqContext, cancel = context.WithTimeout(reqContext, p.cfg.UpstreamTimeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(reqContext, http.MethodPost, targetURL, bytes.NewReader(payload))
 	if err != nil {
 		http.Error(w, "create upstream request failed", http.StatusInternalServerError)
 		return
@@ -69,7 +80,7 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	resp, err := p.client.Do(req)
+	resp, err := p.clientForRequest(requestStreaming).Do(req)
 	if err != nil {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		log.Printf("upstream request failed: %v", err)
@@ -96,8 +107,16 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	if streaming {
-		if err := streamResponse(w, resp.Body, flusher); err != nil {
+		if p.cfg.DebugProxy {
+			log.Printf("[proxy-debug] stream-start timeout=%s target=%s", p.cfg.UpstreamTimeout, targetURL)
+		}
+		if err := streamResponse(w, resp.Body, flusher, p.cfg.DebugProxy, p.cfg.DebugProxyVerbose); err != nil {
 			log.Printf("stream upstream response failed: %v", err)
+			if p.cfg.DebugProxy {
+				log.Printf("[proxy-debug] stream-end status=error err=%v", err)
+			}
+		} else if p.cfg.DebugProxy {
+			log.Printf("[proxy-debug] stream-end status=ok")
 		}
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
@@ -114,6 +133,19 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	log.Printf("upstream POST %s -> %d (%s)", targetURL, resp.StatusCode, time.Since(start))
 }
 
+func (p *Proxy) clientForRequest(streaming bool) *http.Client {
+	if p == nil || p.client == nil {
+		return http.DefaultClient
+	}
+	if !streaming || p.client.Timeout == 0 {
+		return p.client
+	}
+
+	cloned := *p.client
+	cloned.Timeout = 0
+	return &cloned
+}
+
 func (p *Proxy) debugLogRequest(stage string, body []byte) {
 	if !p.cfg.DebugProxy {
 		return
@@ -128,6 +160,14 @@ func (p *Proxy) debugLogResponse(status int, body []byte) {
 	}
 
 	log.Printf("[proxy-debug] upstream-response status=%d body=%s", status, truncateLogBody(string(body), 1200))
+}
+
+func (p *Proxy) debugLogBody(stage string, body []byte) {
+	if !p.cfg.DebugProxyVerbose {
+		return
+	}
+
+	log.Printf("[proxy-debug-body] stage=%s body=%s", stage, string(body))
 }
 
 func transformRequestPayload(body []byte, fallback string, forceModelOverride bool) ([]byte, error) {
@@ -437,6 +477,16 @@ func summarizePayload(body []byte) string {
 	return strings.Join(parts, " ")
 }
 
+func payloadRequestsStreaming(body []byte) bool {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+
+	stream, ok := payload["stream"].(bool)
+	return ok && stream
+}
+
 func sortedKeys(payload map[string]any) []string {
 	keys := make([]string, 0, len(payload))
 	for key := range payload {
@@ -625,11 +675,12 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher) error {
+func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug bool, verbose bool) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	state := &responseStreamState{}
+	state := &responseStreamState{debugVerbose: verbose}
+	chunkCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -641,26 +692,54 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher) error {
 			continue
 		}
 		if data == "[DONE]" {
+			if debug {
+				log.Printf("[proxy-debug] stream-done-marker chunks=%d", chunkCount)
+			}
+			if verbose {
+				log.Printf("[proxy-debug-sse-in] chunk=%d data=%s", chunkCount+1, data)
+			}
 			break
+		}
+		if verbose {
+			log.Printf("[proxy-debug-sse-in] chunk=%d data=%s", chunkCount+1, data)
 		}
 
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if debug {
+				log.Printf("[proxy-debug] stream-skip-invalid-json len=%d", len(data))
+			}
 			continue
 		}
+		chunkCount++
 
 		if err := state.consumeChunk(chunk, w, flusher); err != nil {
+			if debug {
+				log.Printf("[proxy-debug] stream-consume-error chunks=%d err=%v", chunkCount, err)
+			}
 			return err
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if debug {
+			log.Printf("[proxy-debug] stream-scan-error chunks=%d err=%v", chunkCount, err)
+		}
 		return err
 	}
 
 	if err := state.finish(w, flusher); err != nil {
+		if debug {
+			log.Printf("[proxy-debug] stream-finish-error chunks=%d err=%v", chunkCount, err)
+		}
 		return err
 	}
+	if debug {
+		log.Printf("[proxy-debug] stream-finish-ok chunks=%d created=%t text_item=%t tool_calls=%d", chunkCount, state.createdSent, state.itemSent, len(state.toolCalls))
+	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+		if debug {
+			log.Printf("[proxy-debug] stream-write-done-error err=%v", err)
+		}
 		return err
 	}
 	flusher.Flush()
@@ -702,7 +781,8 @@ type responseStreamState struct {
 	itemSent      bool
 	partSent      bool
 
-	toolCalls map[int]*toolCallState
+	toolCalls    map[int]*toolCallState
+	debugVerbose bool
 }
 
 type toolCallState struct {
@@ -736,7 +816,7 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 				"status":     "in_progress",
 				"output":     []any{},
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		s.createdSent = true
@@ -760,7 +840,7 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 				"output_index":  0,
 				"content_index": 0,
 				"delta":         delta,
-			}); err != nil {
+			}, s.debugVerbose); err != nil {
 				return err
 			}
 		}
@@ -791,7 +871,7 @@ func (s *responseStreamState) ensureTextItem(w io.Writer, flusher http.Flusher) 
 					},
 				},
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		s.itemSent = true
@@ -807,7 +887,7 @@ func (s *responseStreamState) ensureTextItem(w io.Writer, flusher http.Flusher) 
 				"type": "output_text",
 				"text": "",
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		s.partSent = true
@@ -857,7 +937,7 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 				"name":      state.name,
 				"arguments": "",
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		state.itemSent = true
@@ -869,7 +949,7 @@ func (s *responseStreamState) consumeToolCall(toolCall struct {
 			"item_id":      state.itemID,
 			"output_index": state.outputIdx,
 			"delta":        delta,
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 	}
@@ -894,7 +974,7 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 				"type": "output_text",
 				"text": text,
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		if err := writeSSEEvent(w, flusher, map[string]any{
@@ -903,7 +983,7 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 			"output_index":  s.textOutputIdx,
 			"content_index": 0,
 			"text":          text,
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		if err := writeSSEEvent(w, flusher, map[string]any{
@@ -921,7 +1001,7 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 					},
 				},
 			},
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		output = append(output, map[string]any{
@@ -952,7 +1032,7 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 			"item_id":      state.itemID,
 			"output_index": state.outputIdx,
 			"arguments":    arguments,
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 
@@ -968,7 +1048,7 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 			"type":         "response.output_item.done",
 			"output_index": state.outputIdx,
 			"item":         item,
-		}); err != nil {
+		}, s.debugVerbose); err != nil {
 			return err
 		}
 		output = append(output, item)
@@ -984,13 +1064,16 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 			"status":     "completed",
 			"output":     output,
 		},
-	})
+	}, s.debugVerbose)
 }
 
-func writeSSEEvent(w io.Writer, flusher http.Flusher, payload any) error {
+func writeSSEEvent(w io.Writer, flusher http.Flusher, payload any, verbose bool) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
+	}
+	if verbose {
+		log.Printf("[proxy-debug-sse-out] data=%s", data)
 	}
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 		return err

@@ -516,6 +516,43 @@ func TestProxyReturnsBadGatewayOnUpstreamFailure(t *testing.T) {
 	}
 }
 
+func TestProxyStreamingIgnoresClientTimeoutForLongRunningSSE(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-long\",\"created\":123,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		flusher.Flush()
+
+		time.Sleep(120 * time.Millisecond)
+
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxy(Config{
+		BaseURL:         upstream.URL,
+		APIKey:          "secret",
+		Model:           "glm-5.1",
+		UpstreamTimeout: 50 * time.Millisecond,
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"glm-5.1","input":"hi","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	proxy.HandleResponses(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("expected response.completed despite long stream, got %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected final done marker, got %s", body)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
