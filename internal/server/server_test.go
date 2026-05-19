@@ -1,14 +1,17 @@
-package main
+package server
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"proxy_doubao/internal/config"
+	"proxy_doubao/internal/proxy"
 )
 
 func TestHealthHandler(t *testing.T) {
-	srv := NewServer(Config{ListenAddr: ":8080"}, &Proxy{})
+	srv := NewServer(config.Config{ListenAddr: ":8080"}, &proxy.Proxy{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -23,7 +26,7 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestResponsesRouteMethodNotAllowed(t *testing.T) {
-	srv := NewServer(Config{}, &Proxy{})
+	srv := NewServer(config.Config{}, &proxy.Proxy{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
 	rec := httptest.NewRecorder()

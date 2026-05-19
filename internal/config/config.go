@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"proxy_doubao/internal/util"
 
 	"github.com/joho/godotenv"
 )
@@ -15,9 +17,10 @@ const (
 	defaultBaseURL     = "https://ark.cn-beijing.volces.com/api/plan/v3"
 	defaultModel       = "glm-5.1"
 	defaultTimeout     = 60 * time.Second
-	defaultContentType = "application/json"
+	DefaultContentType = "application/json"
 )
 
+// Config 聚合所有代理运行所需的配置项。
 type Config struct {
 	ListenAddr         string
 	BaseURL            string
@@ -29,12 +32,16 @@ type Config struct {
 	ForceModelOverride bool
 }
 
+// LoadConfig 从环境变量和 .env 文件加载配置。
+//
+// 优先级：PRIMARY_PROVIDER > 旧版 ARK_*/VOLCANO_* 变量 > 默认值。
+// 多提供者配置使用 PROVIDER_<NAME>_BASE_URL/API_KEY/MODEL 命名约定。
 func LoadConfig() (Config, error) {
 	_ = godotenv.Load()
 
-	baseURL := strings.TrimRight(firstNonEmpty(os.Getenv("VOLCANO_BASE_URL"), os.Getenv("ARK_BASE_URL"), defaultBaseURL), "/")
-	apiKey := firstNonEmpty(os.Getenv("VOLCANO_API_KEY"), os.Getenv("ARK_API_KEY"))
-	model := firstNonEmpty(os.Getenv("VOLCANO_MODEL"), os.Getenv("ARK_MODEL"), defaultModel)
+	baseURL := strings.TrimRight(util.FirstNonEmpty(os.Getenv("VOLCANO_BASE_URL"), os.Getenv("ARK_BASE_URL"), defaultBaseURL), "/")
+	apiKey := util.FirstNonEmpty(os.Getenv("VOLCANO_API_KEY"), os.Getenv("ARK_API_KEY"))
+	model := util.FirstNonEmpty(os.Getenv("VOLCANO_MODEL"), os.Getenv("ARK_MODEL"), defaultModel)
 
 	if providerName := strings.TrimSpace(os.Getenv("PRIMARY_PROVIDER")); providerName != "" {
 		selectedBaseURL, selectedAPIKey, selectedModel, err := loadPrimaryProvider(providerName)
@@ -47,21 +54,21 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		ListenAddr:         normalizeListenAddr(firstNonEmpty(os.Getenv("PORT"), defaultListenAddr)),
+		ListenAddr:         normalizeListenAddr(util.FirstNonEmpty(os.Getenv("PORT"), defaultListenAddr)),
 		BaseURL:            baseURL,
 		APIKey:             apiKey,
 		Model:              model,
 		UpstreamTimeout:    defaultTimeout,
 		DebugProxy:         parseBoolEnv(os.Getenv("DEBUG_PROXY")),
 		DebugProxyVerbose:  parseBoolEnv(os.Getenv("DEBUG_PROXY_VERBOSE")),
-		ForceModelOverride: parseBoolEnv(firstNonEmpty(os.Getenv("FORCE_MODEL_OVERRIDE"), os.Getenv("VOLCANO_FORCE_MODEL_OVERRIDE"), os.Getenv("ARK_FORCE_MODEL_OVERRIDE"))),
+		ForceModelOverride: parseBoolEnv(util.FirstNonEmpty(os.Getenv("FORCE_MODEL_OVERRIDE"), os.Getenv("VOLCANO_FORCE_MODEL_OVERRIDE"), os.Getenv("ARK_FORCE_MODEL_OVERRIDE"))),
 	}
 
 	if cfg.APIKey == "" {
 		return Config{}, errors.New("缺少环境变量 VOLCANO_API_KEY 或 ARK_API_KEY")
 	}
 
-	timeoutText := firstNonEmpty(os.Getenv("UPSTREAM_TIMEOUT"), os.Getenv("VOLCANO_TIMEOUT"))
+	timeoutText := util.FirstNonEmpty(os.Getenv("UPSTREAM_TIMEOUT"), os.Getenv("VOLCANO_TIMEOUT"))
 	if timeoutText != "" {
 		timeout, err := time.ParseDuration(timeoutText)
 		if err != nil {
@@ -73,6 +80,8 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
+// loadPrimaryProvider 根据 PRIMARY_PROVIDER 环境变量加载指定提供者的配置。
+// 环境变量命名约定：PROVIDER_<NAME>_BASE_URL, PROVIDER_<NAME>_API_KEY, PROVIDER_<NAME>_MODEL
 func loadPrimaryProvider(providerName string) (string, string, string, error) {
 	normalizedName := normalizeProviderName(providerName)
 	prefix := "PROVIDER_" + normalizedName + "_"
@@ -98,15 +107,7 @@ func loadPrimaryProvider(providerName string) (string, string, string, error) {
 	return baseURL, apiKey, model, nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
+// normalizeListenAddr 规范化监听地址，自动补全端口前缀。
 func normalizeListenAddr(value string) string {
 	value = strings.TrimSpace(value)
 	switch {
@@ -121,6 +122,7 @@ func normalizeListenAddr(value string) string {
 	}
 }
 
+// parseBoolEnv 将环境变量字符串解析为布尔值。
 func parseBoolEnv(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "on":
@@ -130,6 +132,7 @@ func parseBoolEnv(value string) bool {
 	}
 }
 
+// normalizeProviderName 将提供者名称规范化为大写 + 下划线格式。
 func normalizeProviderName(value string) string {
 	value = strings.TrimSpace(strings.ToUpper(value))
 	if value == "" {

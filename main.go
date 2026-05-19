@@ -5,10 +5,14 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"proxy_doubao/internal/config"
+	"proxy_doubao/internal/proxy"
+	"proxy_doubao/internal/server"
 )
 
 func main() {
-	cfg, err := LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
@@ -17,11 +21,11 @@ func main() {
 		Timeout: cfg.UpstreamTimeout,
 	}
 
-	proxy := NewProxy(cfg, client)
-	server := NewServer(cfg, proxy)
+	p := proxy.NewProxy(cfg, client)
+	srv := server.NewServer(cfg, p)
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           server.Handler(),
+		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"bytes"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"proxy_doubao/internal/config"
 )
 
 func TestProxyForwardsResponsesRequest(t *testing.T) {
@@ -30,7 +32,7 @@ func TestProxyForwardsResponsesRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer client-value")
 	req.Header.Set("Content-Type", "application/json")
@@ -74,7 +76,7 @@ func TestProxyTransformsResponsesInputToMessages(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","instructions":"你是代码助手","input":"帮我分析这个函数","stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -122,7 +124,7 @@ func TestProxyMapsDeveloperRoleToSystem(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","input":[{"role":"developer","content":"你是代码助手"},{"role":"user","content":"请解释这个报错"}],"stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -163,7 +165,7 @@ func TestProxyNormalizesExistingMessagesRole(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","messages":[{"role":"developer","content":"你是代码助手"}],"stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -217,7 +219,7 @@ func TestProxyTransformsResponsesToolsToChatCompletionsTools(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","input":"hi","tools":[{"type":"function","name":"run_command","description":"run shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}],"stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -267,7 +269,7 @@ func TestProxyDropsUnsupportedNonFunctionTools(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","input":"hi","tools":[{"type":"function","name":"shell_command","description":"run shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}},{"type":"web_search","external_web_access":true}],"tool_choice":"auto","stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -292,7 +294,7 @@ func TestProxyStreamsSSE(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -337,7 +339,7 @@ func TestProxyStreamsFunctionCallEvents(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -374,7 +376,7 @@ func TestProxyStreamsMixedTextAndFunctionCallWithDistinctOutputIndexes(t *testin
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -435,7 +437,7 @@ func TestProxyTransformsFunctionCallOutputIntoToolMessage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	reqBody := `{"model":"glm-5.1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"创建一个 hellos.txt 文件，写入 hello"}]},{"type":"function_call","call_id":"call_123","name":"shell_command","arguments":"{\"command\":\"Set-Content -Path \\\"hellos.txt\\\" -Value \\\"hello\\\"\"}"},{"type":"function_call_output","call_id":"call_123","output":"hello"}],"stream":false}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -481,7 +483,7 @@ func TestProxyPassesThroughUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":false}`))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -504,7 +506,7 @@ func TestProxyReturnsBadGatewayOnUpstreamFailure(t *testing.T) {
 		}),
 	}
 
-	proxy := NewProxy(Config{BaseURL: "https://example.com", APIKey: "secret", Model: "glm-5.1"}, client)
+	proxy := NewProxy(config.Config{BaseURL: "https://example.com", APIKey: "secret", Model: "glm-5.1"}, client)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":false}`))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -531,7 +533,7 @@ func TestProxyStreamingIgnoresClientTimeoutForLongRunningSSE(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy := NewProxy(Config{
+	proxy := NewProxy(config.Config{
 		BaseURL:         upstream.URL,
 		APIKey:          "secret",
 		Model:           "glm-5.1",

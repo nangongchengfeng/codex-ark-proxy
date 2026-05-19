@@ -1,24 +1,29 @@
-package main
+package server
 
 import (
 	"log"
 	"net/http"
 	"time"
+
+	"proxy_doubao/internal/config"
+	"proxy_doubao/internal/proxy"
 )
 
+// Server 封装 HTTP 路由和中间件。
 type Server struct {
 	handler http.Handler
 }
 
-func NewServer(_ Config, proxy *Proxy) *Server {
+// NewServer 创建 Server 实例，注册路由并应用日志中间件。
+func NewServer(_ config.Config, p *proxy.Proxy) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
-		if proxy == nil {
+		if p == nil {
 			http.Error(w, "proxy not configured", http.StatusInternalServerError)
 			return
 		}
-		proxy.HandleResponses(w, r)
+		p.HandleResponses(w, r)
 	})
 
 	return &Server{
@@ -26,6 +31,7 @@ func NewServer(_ Config, proxy *Proxy) *Server {
 	}
 }
 
+// Handler 返回配置好的 HTTP Handler。
 func (s *Server) Handler() http.Handler {
 	return s.handler
 }
@@ -37,7 +43,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", defaultContentType)
+	w.Header().Set("Content-Type", config.DefaultContentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
