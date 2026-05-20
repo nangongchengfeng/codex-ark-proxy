@@ -294,6 +294,9 @@ func normalizeTools(tools []any) []map[string]any {
 		}
 
 		if functionBlock, ok := tool["function"].(map[string]any); ok {
+			if util.TrimStringValue(functionBlock["name"]) == "" {
+				continue
+			}
 			normalizedTool["function"] = functionBlock
 			normalized = append(normalized, normalizedTool)
 			continue
@@ -313,10 +316,10 @@ func normalizeTools(tools []any) []map[string]any {
 			functionBlock["strict"] = strct
 		}
 
-		if len(functionBlock) > 0 {
-			normalizedTool["function"] = functionBlock
+		if util.TrimStringValue(functionBlock["name"]) == "" {
+			continue
 		}
-
+		normalizedTool["function"] = functionBlock
 		normalized = append(normalized, normalizedTool)
 	}
 

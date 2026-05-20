@@ -67,18 +67,30 @@ type toolCallState struct {
 
 // streamResponse 将上游 SSE 流实时转换为 Codex /v1/responses 格式。
 func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug bool, verbose bool) error {
-	// 逐行扫描上游 SSE 事件流
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// 逐行读取上游 SSE 事件流，避免 Scanner 的 token 长度限制截断大 chunk。
+	reader := bufio.NewReaderSize(body, 64*1024)
 
 	// 初始化流状态机（跟踪 response 生命周期 + 文本/工具调用状态）
 
 	state := &responseStreamState{debugVerbose: verbose}
 	chunkCount := 0
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			if debug {
+				log.Printf("[proxy-debug] stream-scan-error chunks=%d err=%v", chunkCount, err)
+			}
+			return err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if err == io.EOF && line == "" {
+			break
+		}
 		// 跳过非 SSE data 行
 		if !strings.HasPrefix(line, "data: ") {
+			if err == io.EOF {
+				break
+			}
 			continue
 		}
 
@@ -122,12 +134,9 @@ func streamResponse(w io.Writer, body io.Reader, flusher http.Flusher, debug boo
 			}
 			return err
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		if debug {
-			log.Printf("[proxy-debug] stream-scan-error chunks=%d err=%v", chunkCount, err)
+		if err == io.EOF {
+			break
 		}
-		return err
 	}
 
 	// 发送流结束事件：content_part.done → output_text.done → output_item.done → response.completed
@@ -203,7 +212,7 @@ func (s *responseStreamState) consumeChunk(chunk chatCompletionChunk, w io.Write
 			if err := writeSSEEvent(w, flusher, map[string]any{
 				"type":          "response.output_text.delta",
 				"item_id":       s.textItemID,
-				"output_index":  0,
+				"output_index":  s.textOutputIdx,
 				"content_index": 0,
 				"delta":         delta,
 			}, s.debugVerbose); err != nil {
@@ -341,7 +350,11 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 		return nil
 	}
 
-	output := make([]map[string]any, 0, 1+len(s.toolCalls))
+	type outputItem struct {
+		outputIdx int
+		item      map[string]any
+	}
+	outputItems := make([]outputItem, 0, 1+len(s.toolCalls))
 	text := s.textBuilder.String()
 
 	// ★ 收尾文本输出：content_part.done → output_text.done → output_item.done
@@ -387,18 +400,20 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 		}, s.debugVerbose); err != nil {
 			return err
 		}
-		output = append(output, map[string]any{
-			"id":     s.textItemID,
-			"type":   "message",
-			"status": "completed",
-			"role":   "assistant",
-			"content": []map[string]any{
-				{
-					"type": "output_text",
-					"text": text,
+		outputItems = append(outputItems, outputItem{
+			outputIdx: s.textOutputIdx,
+			item: map[string]any{
+				"id":     s.textItemID,
+				"type":   "message",
+				"status": "completed",
+				"role":   "assistant",
+				"content": []map[string]any{
+					{
+						"type": "output_text",
+						"text": text,
+					},
 				},
-			},
-		})
+			}})
 	}
 
 	// ★ 收尾工具调用：按 index 排序后发送 function_call_arguments.done → output_item.done
@@ -436,7 +451,18 @@ func (s *responseStreamState) finish(w io.Writer, flusher http.Flusher) error {
 		}, s.debugVerbose); err != nil {
 			return err
 		}
-		output = append(output, item)
+		outputItems = append(outputItems, outputItem{
+			outputIdx: state.outputIdx,
+			item:      item,
+		})
+	}
+
+	slices.SortFunc(outputItems, func(a, b outputItem) int {
+		return a.outputIdx - b.outputIdx
+	})
+	output := make([]map[string]any, 0, len(outputItems))
+	for _, item := range outputItems {
+		output = append(output, item.item)
 	}
 
 	// ★ 最后发送 response.completed，汇总所有 output 条目

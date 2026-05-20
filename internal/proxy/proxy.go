@@ -115,6 +115,9 @@ func (p *Proxy) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	util.CopyResponseHeaders(w.Header(), resp.Header)
+	if streaming {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	if streaming {

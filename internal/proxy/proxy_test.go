@@ -301,7 +301,7 @@ func TestProxyStreamsSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	proxy.HandleResponses(rec, req)
 
-	if rec.Header().Get("Content-Type") != "text/event-stream" {
+	if rec.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
 		t.Fatalf("unexpected content type: %s", rec.Header().Get("Content-Type"))
 	}
 	if !strings.Contains(rec.Body.String(), `"type":"response.created"`) {
@@ -392,6 +392,88 @@ func TestProxyStreamsMixedTextAndFunctionCallWithDistinctOutputIndexes(t *testin
 	}
 }
 
+func TestProxyStreamsFunctionCallBeforeTextUsesConsistentOutputIndexes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-tool-first\",\"created\":790,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_first\",\"type\":\"function\",\"function\":{\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-tool-first\",\"created\":790,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"content\":\"Tool finished.\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	proxy.HandleResponses(rec, req)
+
+	events := parseSSEDataEvents(t, rec.Body.String())
+	foundTextDelta := false
+	for _, event := range events {
+		if event["type"] != "response.output_text.delta" {
+			continue
+		}
+		foundTextDelta = true
+		if intValue(t, event["output_index"]) != 1 {
+			t.Fatalf("expected text delta output_index=1 after tool call, got %#v", event["output_index"])
+		}
+	}
+	if !foundTextDelta {
+		t.Fatalf("expected response.output_text.delta event, got %s", rec.Body.String())
+	}
+}
+
+func TestProxyCompletedOutputFollowsOutputIndexOrder(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-order\",\"created\":791,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_order\",\"type\":\"function\",\"function\":{\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-order\",\"created\":791,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	proxy.HandleResponses(rec, req)
+
+	events := parseSSEDataEvents(t, rec.Body.String())
+	var completed map[string]any
+	for _, event := range events {
+		if event["type"] == "response.completed" {
+			completed = event
+			break
+		}
+	}
+	if completed == nil {
+		t.Fatalf("expected response.completed event, got %s", rec.Body.String())
+	}
+
+	response, ok := completed["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected response object, got %#v", completed["response"])
+	}
+	output, ok := response["output"].([]any)
+	if !ok || len(output) != 2 {
+		t.Fatalf("expected 2 output items, got %#v", response["output"])
+	}
+
+	first := output[0].(map[string]any)
+	second := output[1].(map[string]any)
+	if first["type"] != "function_call" || second["type"] != "message" {
+		t.Fatalf("expected output ordered by output_index [function_call,message], got %#v", output)
+	}
+}
+
 func TestProxyTransformsFunctionCallOutputIntoToolMessage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -465,6 +547,27 @@ func TestTransformRequestPayloadForceModelOverride(t *testing.T) {
 
 	if transformed["model"] != "doubao-seed-2-0-code-preview-260215" {
 		t.Fatalf("expected model override, got %v", transformed["model"])
+	}
+}
+
+func TestTransformRequestPayloadDropsInvalidFunctionTools(t *testing.T) {
+	body := []byte(`{"model":"glm-5.1","tool_choice":"auto","tools":[{"type":"function","function":{"description":"missing name"}}]}`)
+
+	payload, err := transformRequestPayload(body, "glm-5.1", false)
+	if err != nil {
+		t.Fatalf("transformRequestPayload returned error: %v", err)
+	}
+
+	var transformed map[string]any
+	if err := json.Unmarshal(payload, &transformed); err != nil {
+		t.Fatalf("unexpected transformed payload: %v", err)
+	}
+
+	if _, exists := transformed["tools"]; exists {
+		t.Fatalf("expected invalid function tool to be dropped, got %#v", transformed["tools"])
+	}
+	if _, exists := transformed["tool_choice"]; exists {
+		t.Fatalf("expected tool_choice to be removed with invalid tools, got %#v", transformed["tool_choice"])
 	}
 }
 
@@ -555,8 +658,89 @@ func TestProxyStreamingIgnoresClientTimeoutForLongRunningSSE(t *testing.T) {
 	}
 }
 
+func TestProxyStreamingSetsUTF8EventStreamContentType(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-charset\",\"created\":124,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	proxy.HandleResponses(rec, req)
+
+	if rec.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("expected utf-8 event stream content type, got %q", rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestProxyStreamsLargeSingleChunkArguments(t *testing.T) {
+	largeArguments := strings.Repeat("a", 1024*1024+128)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		payload := fmt.Sprintf("data: {\"id\":\"chatcmpl-large\",\"created\":125,\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_large\",\"type\":\"function\",\"function\":{\"name\":\"shell_command\",\"arguments\":%q}}]},\"finish_reason\":\"tool_calls\"}]}\n\n", largeArguments)
+		_, _ = w.Write([]byte(payload))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxy(config.Config{BaseURL: upstream.URL, APIKey: "secret", Model: "glm-5.1"}, upstream.Client())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	proxy.HandleResponses(rec, req)
+
+	if !strings.Contains(rec.Body.String(), `"type":"response.completed"`) {
+		t.Fatalf("expected response.completed for large single chunk, got %s", rec.Body.String())
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+func parseSSEDataEvents(t *testing.T, body string) []map[string]any {
+	t.Helper()
+
+	lines := strings.Split(body, "\n")
+	events := make([]map[string]any, 0)
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+
+		var event map[string]any
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			t.Fatalf("failed to parse event %q: %v", data, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func intValue(t *testing.T, value any) int {
+	t.Helper()
+
+	number, ok := value.(float64)
+	if !ok {
+		t.Fatalf("expected numeric value, got %#v", value)
+	}
+	return int(number)
 }
