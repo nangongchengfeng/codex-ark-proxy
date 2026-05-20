@@ -3,6 +3,7 @@ name: Build and Test
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
     branches: [main, master]
 
@@ -34,6 +35,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -57,14 +60,7 @@ jobs:
         run: |
           go build -ldflags="-s -w" -o "${{ matrix.artifact }}${{ matrix.ext }}" .
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}${{ matrix.ext }}
-
       - name: Upload to Release
-        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ matrix.artifact }}${{ matrix.ext }}
